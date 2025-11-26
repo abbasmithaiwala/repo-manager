@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 GitHub Commit Fetcher
-Fetches all commits made by the authenticated user on a specific date across all repositories.
+Fetches all commits made by the authenticated user on a specific date across ALL repositories.
+This includes commits to owned repos, forks, and any other repository across GitHub.
+Uses GitHub Search API for comprehensive commit discovery.
 """
 
 import os
@@ -9,8 +11,9 @@ import sys
 import json
 import argparse
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Set
 import requests
+import time
 
 
 class GitHubCommitFetcher:
@@ -23,125 +26,140 @@ class GitHubCommitFetcher:
         self.base_url = 'https://api.github.com'
         self.username = None
 
-    def get_authenticated_user(self) -> str:
-        """Get the authenticated user's username."""
+    def get_authenticated_user(self) -> Dict:
+        """Get the authenticated user's information."""
         response = requests.get(f'{self.base_url}/user', headers=self.headers)
         response.raise_for_status()
-        return response.json()['login']
+        user_data = response.json()
+        return {
+            'login': user_data['login'],
+            'email': user_data.get('email'),
+            'name': user_data.get('name')
+        }
 
-    def get_all_repos(self) -> List[Dict]:
-        """Fetch all repositories for the authenticated user."""
-        repos = []
-        page = 1
-        per_page = 100
-
-        print(f"Fetching repositories for user: {self.username}")
-
-        while True:
-            response = requests.get(
-                f'{self.base_url}/user/repos',
-                headers=self.headers,
-                params={'page': page, 'per_page': per_page, 'affiliation': 'owner,collaborator,organization_member'}
-            )
-            response.raise_for_status()
-
-            data = response.json()
-            if not data:
-                break
-
-            repos.extend(data)
-            print(f"  Found {len(repos)} repositories so far...")
-            page += 1
-
-        print(f"Total repositories: {len(repos)}")
-        return repos
-
-    def get_commits_for_date(self, repo_full_name: str, date: str) -> List[Dict]:
-        """Fetch commits for a specific repository on a given date."""
-        # Parse the date and create a range for the entire day
+    def search_commits_by_author_and_date(self, author: str, date: str) -> List[Dict]:
+        """
+        Use GitHub Search API to find commits by author on a specific date.
+        This searches across ALL of GitHub, including forks and any repository.
+        """
         target_date = datetime.strptime(date, '%Y-%m-%d')
-        since = target_date.isoformat() + 'Z'
-        until = (target_date + timedelta(days=1)).isoformat() + 'Z'
+        next_date = target_date + timedelta(days=1)
 
-        commits = []
+        # GitHub Search API date format
+        date_str = target_date.strftime('%Y-%m-%d')
+        next_date_str = next_date.strftime('%Y-%m-%d')
+
+        # Search query: author and date range
+        query = f'author:{author} committer-date:{date_str}..{next_date_str}'
+
+        print(f"Searching commits for author '{author}' on {date}...")
+        print(f"Search query: {query}\n")
+
+        all_commits = []
         page = 1
         per_page = 100
 
         while True:
-            response = requests.get(
-                f'{self.base_url}/repos/{repo_full_name}/commits',
-                headers=self.headers,
-                params={
-                    'author': self.username,
-                    'since': since,
-                    'until': until,
-                    'page': page,
-                    'per_page': per_page
-                }
-            )
+            try:
+                response = requests.get(
+                    f'{self.base_url}/search/commits',
+                    headers={
+                        **self.headers,
+                        'Accept': 'application/vnd.github.cloak-preview+json'  # Required for commit search
+                    },
+                    params={
+                        'q': query,
+                        'per_page': per_page,
+                        'page': page,
+                        'sort': 'committer-date',
+                        'order': 'desc'
+                    }
+                )
 
-            if response.status_code == 409:
-                # Repository is empty
+                # Check rate limiting
+                if response.status_code == 403:
+                    reset_time = int(response.headers.get('X-RateLimit-Reset', 0))
+                    if reset_time:
+                        wait_time = reset_time - int(time.time())
+                        print(f"Rate limit reached. Waiting {wait_time} seconds...")
+                        time.sleep(wait_time + 1)
+                        continue
+
+                response.raise_for_status()
+                data = response.json()
+
+                items = data.get('items', [])
+                if not items:
+                    break
+
+                print(f"  Page {page}: Found {len(items)} commits")
+                all_commits.extend(items)
+
+                # Check if there are more pages
+                total_count = data.get('total_count', 0)
+                if len(all_commits) >= total_count or len(items) < per_page:
+                    break
+
+                page += 1
+                time.sleep(0.5)  # Be nice to the API
+
+            except requests.exceptions.HTTPError as e:
+                print(f"Error searching commits: {e}")
+                if e.response.status_code == 422:
+                    print("Search query may be invalid or no results found")
                 break
 
-            response.raise_for_status()
-
-            data = response.json()
-            if not data:
-                break
-
-            commits.extend(data)
-            page += 1
-
-        return commits
+        print(f"Total commits found: {len(all_commits)}\n")
+        return all_commits
 
     def fetch_commits_by_date(self, date: str) -> List[Dict]:
-        """Fetch all commits made by the user on a specific date."""
+        """
+        Fetch all commits made by the user on a specific date.
+        Uses GitHub Search API to find commits across ALL repositories.
+        """
         # Validate date format
         try:
             datetime.strptime(date, '%Y-%m-%d')
         except ValueError:
             raise ValueError("Date must be in YYYY-MM-DD format")
 
-        # Get authenticated user
-        self.username = self.get_authenticated_user()
+        # Get authenticated user info
+        user_info = self.get_authenticated_user()
+        self.username = user_info['login']
 
-        # Get all repositories
-        repos = self.get_all_repos()
+        print(f"Authenticated as: {self.username}")
+        if user_info.get('name'):
+            print(f"Name: {user_info['name']}")
+        if user_info.get('email'):
+            print(f"Email: {user_info['email']}")
+        print()
 
-        # Fetch commits from each repository
-        all_commits = []
-        print(f"\nSearching for commits on {date}...")
+        # Search for commits using the Search API
+        search_results = self.search_commits_by_author_and_date(self.username, date)
 
-        for i, repo in enumerate(repos, 1):
-            repo_name = repo['full_name']
-            print(f"[{i}/{len(repos)}] Checking {repo_name}...", end=' ')
+        # Process and format the results
+        formatted_commits = []
+        for commit_data in search_results:
+            repo_name = commit_data['repository']['full_name']
+            commit = commit_data['commit']
+            sha = commit_data['sha']
 
-            try:
-                commits = self.get_commits_for_date(repo_name, date)
+            formatted_commit = {
+                'repository': repo_name,
+                'commit_id': sha,
+                'commit_message': commit['message'],
+                'timestamp': commit['author']['date'],
+                'url': commit_data['html_url'],
+                'author_name': commit['author']['name'],
+                'author_email': commit['author']['email'],
+                'committer_name': commit['committer']['name'],
+                'committer_date': commit['committer']['date']
+            }
+            formatted_commits.append(formatted_commit)
 
-                for commit in commits:
-                    commit_data = {
-                        'repository': repo_name,
-                        'commit_id': commit['sha'],
-                        'commit_message': commit['commit']['message'],
-                        'timestamp': commit['commit']['author']['date'],
-                        'url': commit['html_url']
-                    }
-                    all_commits.append(commit_data)
+            print(f"  [{repo_name}] {sha[:7]}")
 
-                if commits:
-                    print(f"Found {len(commits)} commit(s)")
-                else:
-                    print("No commits")
-
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 409:
-                    print("Empty repository")
-                else:
-                    print(f"Error: {e}")
-
-        return all_commits
+        return formatted_commits
 
 
 def main():
@@ -193,7 +211,11 @@ Examples:
                 print(f"    ID: {commit['commit_id'][:7]}")
                 print(f"    Message: {commit['commit_message'].split(chr(10))[0][:80]}")
                 print(f"    Time: {commit['timestamp']}")
+                print(f"    Author: {commit.get('author_name', 'N/A')} <{commit.get('author_email', 'N/A')}>")
                 print()
+        else:
+            print("\nNo commits found for the specified date.")
+            print("Make sure the date is correct and that you have commits on that date.")
 
     except ValueError as e:
         print(f"Error: {e}")
