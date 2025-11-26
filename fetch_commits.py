@@ -112,10 +112,88 @@ class GitHubCommitFetcher:
         print(f"Total commits found: {len(all_commits)}\n")
         return all_commits
 
+    def get_all_repos(self) -> List[Dict]:
+        """Fetch all repositories accessible to the user."""
+        repos = []
+        page = 1
+        per_page = 100
+
+        print(f"Fetching accessible repositories...")
+
+        while True:
+            response = requests.get(
+                f'{self.base_url}/user/repos',
+                headers=self.headers,
+                params={
+                    'page': page,
+                    'per_page': per_page,
+                    'affiliation': 'owner,collaborator,organization_member'
+                }
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            if not data:
+                break
+
+            repos.extend(data)
+            page += 1
+
+        print(f"  Found {len(repos)} accessible repositories\n")
+        return repos
+
+    def get_commits_from_repo(self, repo_full_name: str, date: str) -> List[Dict]:
+        """Query commits from a specific repository for the given date."""
+        target_date = datetime.strptime(date, '%Y-%m-%d')
+        since = target_date.isoformat() + 'Z'
+        until = (target_date + timedelta(days=1)).isoformat() + 'Z'
+
+        commits = []
+        page = 1
+        per_page = 100
+
+        while True:
+            try:
+                response = requests.get(
+                    f'{self.base_url}/repos/{repo_full_name}/commits',
+                    headers=self.headers,
+                    params={
+                        'author': self.username,
+                        'since': since,
+                        'until': until,
+                        'page': page,
+                        'per_page': per_page
+                    }
+                )
+
+                if response.status_code == 409:
+                    # Empty repository
+                    break
+
+                response.raise_for_status()
+
+                data = response.json()
+                if not data:
+                    break
+
+                commits.extend(data)
+                page += 1
+
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code in [403, 404, 409]:
+                    # Repository inaccessible or empty
+                    break
+                raise
+
+        return commits
+
     def fetch_commits_by_date(self, date: str) -> List[Dict]:
         """
         Fetch all commits made by the user on a specific date.
-        Uses GitHub Search API to find commits across ALL repositories.
+        Uses HYBRID approach:
+        1. GitHub Search API - finds commits across all of GitHub
+        2. Direct Repository API - queries all accessible repos
+        Combines and deduplicates results for complete coverage.
         """
         # Validate date format
         try:
@@ -134,30 +212,75 @@ class GitHubCommitFetcher:
             print(f"Email: {user_info['email']}")
         print()
 
-        # Search for commits using the Search API
+        # Method 1: Search API for comprehensive discovery
+        print("=" * 60)
+        print("METHOD 1: GitHub Search API")
+        print("=" * 60)
         search_results = self.search_commits_by_author_and_date(self.username, date)
 
-        # Process and format the results
-        formatted_commits = []
+        # Method 2: Direct repository queries for complete coverage
+        print("=" * 60)
+        print("METHOD 2: Direct Repository Queries")
+        print("=" * 60)
+        repos = self.get_all_repos()
+
+        repo_commits = []
+        seen_in_search = {commit['sha'] for commit in search_results}
+
+        print("Querying each repository for commits...")
+        for i, repo in enumerate(repos, 1):
+            repo_name = repo['full_name']
+            commits = self.get_commits_from_repo(repo_name, date)
+
+            if commits:
+                new_commits = [c for c in commits if c['sha'] not in seen_in_search]
+                if new_commits:
+                    print(f"  [{i}/{len(repos)}] {repo_name}: {len(new_commits)} new commit(s)")
+                    repo_commits.extend(new_commits)
+
+            time.sleep(0.1)  # Rate limiting courtesy
+
+        print(f"\nTotal new commits from repos: {len(repo_commits)}\n")
+
+        # Combine and deduplicate all commits
+        print("=" * 60)
+        print("COMBINING RESULTS")
+        print("=" * 60)
+
+        all_commits_dict = {}  # Use dict to deduplicate by SHA
+
+        # Add search results
         for commit_data in search_results:
-            repo_name = commit_data['repository']['full_name']
-            commit = commit_data['commit']
             sha = commit_data['sha']
-
-            formatted_commit = {
-                'repository': repo_name,
+            all_commits_dict[sha] = {
+                'repository': commit_data['repository']['full_name'],
                 'commit_id': sha,
-                'commit_message': commit['message'],
-                'timestamp': commit['author']['date'],
+                'commit_message': commit_data['commit']['message'],
+                'timestamp': commit_data['commit']['author']['date'],
                 'url': commit_data['html_url'],
-                'author_name': commit['author']['name'],
-                'author_email': commit['author']['email'],
-                'committer_name': commit['committer']['name'],
-                'committer_date': commit['committer']['date']
+                'author_name': commit_data['commit']['author']['name'],
+                'author_email': commit_data['commit']['author']['email'],
             }
-            formatted_commits.append(formatted_commit)
 
-            print(f"  [{repo_name}] {sha[:7]}")
+        # Add repo commits
+        for commit_data in repo_commits:
+            sha = commit_data['sha']
+            if sha not in all_commits_dict:
+                all_commits_dict[sha] = {
+                    'repository': commit_data['commit']['url'].split('/repos/')[1].split('/commits/')[0],
+                    'commit_id': sha,
+                    'commit_message': commit_data['commit']['message'],
+                    'timestamp': commit_data['commit']['author']['date'],
+                    'url': commit_data['html_url'],
+                    'author_name': commit_data['commit']['author']['name'],
+                    'author_email': commit_data['commit']['author']['email'],
+                }
+
+        formatted_commits = list(all_commits_dict.values())
+
+        print(f"Search API commits: {len(search_results)}")
+        print(f"Direct repo commits (new): {len(repo_commits)}")
+        print(f"Total unique commits: {len(formatted_commits)}\n")
 
         return formatted_commits
 
