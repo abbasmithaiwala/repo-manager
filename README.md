@@ -61,17 +61,17 @@ export $(cat .env | xargs)
 ### Basic Usage
 
 ```bash
-python fetch_commits.py 2024-11-26
+python fetch_commits.py 2025-11-26
 ```
 
 This will:
-- Search all your repositories for commits on 2024-11-26
+- Search all your repositories for commits on 2025-11-26
 - Save results to `commits.json`
 
 ### Custom Output File
 
 ```bash
-python fetch_commits.py 2024-11-26 --output my_commits.json
+python fetch_commits.py 2025-11-26 --output my_commits.json
 ```
 
 ### Help
@@ -93,7 +93,7 @@ The script generates a JSON file with the following structure:
       "repository": "username/repo-name",
       "commit_id": "abc123def456...",
       "commit_message": "Fix bug in authentication",
-      "timestamp": "2024-11-26T10:30:45Z",
+      "timestamp": "2025-11-26T10:30:45Z",
       "url": "https://github.com/username/repo-name/commit/abc123"
     }
   ]
