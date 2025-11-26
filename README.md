@@ -86,7 +86,7 @@ The script generates a JSON file with the following structure:
 
 ```json
 {
-  "date": "2024-11-26",
+  "date": "2025-11-26",
   "total_commits": 5,
   "commits": [
     {
@@ -112,7 +112,7 @@ The script generates a JSON file with the following structure:
 
 ### Fetch commits from a specific date
 ```bash
-python fetch_commits.py 2025-01-15
+python fetch_commits.py 2025-11-26
 ```
 
 ### Fetch today's commits
